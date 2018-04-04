@@ -1,0 +1,238 @@
+'''
+Robot notes:
+
+UNFINISHED WORK, CANNOT BE USED RIGHT NOW
+
+Robot arm uses two types of coordinates:
+    WorldX = Side to side relative to world coordinates
+    WorldY = Forward and back relative to world coordinates
+    WorldZ = Up and down relative to world coordinates; equal to variable: "setHeight"
+    localHeight = Up and down relative to robot arm; equal to variable: "WorldZ"
+    localDepth = Forward and back relative to robot arm
+
+'''
+
+import time
+import smbus
+import numpy as np
+from math import *
+from scipy import interpolate
+
+# for RPI version 1, use "bus = smbus.SMBus(0)"
+bus = smbus.SMBus(1)
+
+# These are the address we setup in the Arduino Program
+addresses = [0x0b,0x0c,0x0d,0x0e]
+
+# Constants (robot dimensions in mm)
+baseHeight = 240
+humerus = 220
+ulna = 150
+hand = 200
+errors = 0
+
+# Line path list
+linePathList=[[],[]] # contains setpoints between (x0,y0) and (x1,y1)
+angleList=[[],[],[],[]] # contains all calculated angles for: base, shoulder, elbow and wrist
+sendList=[[],[],[],[]] # contains all converted send values for individual joint controllers
+
+# bus.write_byte_data(address, 0, value)
+def sendPositions(option):
+    if option == "simulate":
+        for x in range(len(angleList[0])):
+            print "Simulated:",sendList[0][x],sendList[1][x],sendList[2][x],sendList[3][x]
+        
+    elif option == "send":
+        for x in range(len(angleList[0])):
+            bus.write_byte(0x0b,sendList[0][x])
+            bus.write_byte(0x0c,sendList[1][x])
+            bus.write_byte(0x0d,sendList[2][x])
+            bus.write_byte(0x0e,sendList[3][x])
+            print "sent :",sendList[0][x],sendList[1][x],sendList[2][x],sendList[3][x]
+            time.sleep(0.03)
+        
+def findAngles(localHeight, localDepth, wristAngleToGround):
+    global shoulder
+    global elbow
+    global gwristAngleToGround
+    global wristAngle
+    
+    gwristAngleToGround = wristAngleToGround
+    offsetsHeight = sin(radians(wristAngleToGround))*hand
+    offsetsDepth = cos(radians(wristAngleToGround))*hand
+    wristHeight = localHeight-offsetsHeight-baseHeight
+    wristDepth = localDepth-offsetsDepth
+    shoulderToWrist = sqrt((wristHeight**2)+(wristDepth**2))
+    angle1 = atan2(wristHeight,wristDepth)
+    angle2 = acos(((humerus*humerus)-(ulna*ulna)+(shoulderToWrist*shoulderToWrist))/((2*humerus)*shoulderToWrist))
+    shoulder = int((angle1+angle2)*180/pi)
+    elbow = int(-(180-(acos(((humerus*humerus)+(ulna*ulna)-(shoulderToWrist*shoulderToWrist))/((2*humerus)*ulna)))*180/pi))
+    wristAngle = wristAngleToGround-elbow-shoulder
+
+def interpolateXY(startX,startY,endX,endY):
+#Function creates points between two points#
+#Points are saved in a list called linePathList#
+#Coordinates are still WORLD X and WORLD Y#
+    if startX > endX:
+        if startY == endY:
+            print "startX > endX, startY == endY"
+            indepVar = [endX,startX]
+            depVar = [endY,startY]
+            func = interpolate.interp1d(indepVar,depVar)
+            for x in range(endX,startX+1):            
+                linePathList[0].append(startX-len(linePathList[0]))#x-coordinate
+                linePathList[1].append(int(func(x)))#y-coordinate
+        elif startY > endY: 
+            print "startX > endX, startY > endY"
+            indepVar = [endX,startX]
+            depVar = [endY,startY]
+            func = interpolate.interp1d(indepVar,depVar)
+            for x in range(endX-1,startX):            
+                linePathList[0].append(startX-len(linePathList[0]))#x-coordinate
+                linePathList[1].append(int(func(startX-len(linePathList[1]))))#y-coordinate
+        elif startY < endY:
+            print "startX > endX, startY < endY"
+            indepVar = [endX,startX]
+            depVar = [endY,startY]
+            func = interpolate.interp1d(indepVar,depVar)
+            for x in range(endX,startX+1):            
+                linePathList[0].append(startX-len(linePathList[0]))#x-coordinate
+                linePathList[1].append(int(func(startX-len(linePathList[1]))))#y-coordinate                
+     
+    elif startX == endX:
+        if startY == endY: # a single point
+            print "single point"           
+            linePathList[0].append(startX)#x-coordinate
+            linePathList[1].append(startY)#y-coordinate
+        elif startY > endY: 
+            print "startX == endX,startY > endY"
+            indepVar = [endY,startY]
+            depVar = [endX,startX]
+            func = interpolate.interp1d(indepVar,depVar)
+            for x in range(endY,startY+1):            
+                linePathList[0].append(int(func(x)))#x-coordinate
+                linePathList[1].append(startY-len(linePathList[1]))#y-coordinate     
+        elif startY < endY: 
+            print "startX == endX,startY < endY"
+            indepVar = [endY,startY]
+            depVar = [endX,startX]
+            func = interpolate.interp1d(indepVar,depVar)
+            for x in range(startY,endY+1):            
+                linePathList[0].append(int(func(x)))#x-coordinate
+                linePathList[1].append(x)#y-coordinate    
+            
+    elif startX < endX:
+        if startY == endY: # horizontal line, no change in depth
+            print "startX < endX, startY == endY"
+            indepVar = [startX,endX]
+            depVar = [startY,endY]
+            func = interpolate.interp1d(indepVar,depVar)
+            for x in range(startX,endX+1):            
+                linePathList[0].append(x)#x-coordinate
+                linePathList[1].append(int(func(x)))#y-coordinate
+        elif startY > endY: # horizontal line, no change in depth
+            print "startX < endX, startY > endY"
+            indepVar = [startX,endX]
+            depVar = [startY,endY]
+            func = interpolate.interp1d(indepVar,depVar)
+            for x in range(startX,endX+1):            
+                linePathList[0].append(x)#x-coordinate
+                linePathList[1].append(int(func(x)))#y-coordinate
+        elif startY < endY: # horizontal line, no change in depth
+            print "startX < endX, startY < endY"
+            indepVar = [startX,endX]
+            depVar = [startY,endY]
+            func = interpolate.interp1d(indepVar,depVar)
+            for x in range(startX,endX+1):            
+                linePathList[0].append(x)#x-coordinate
+                linePathList[1].append(int(func(x)))#y-coordinate   
+
+def calculateAngleList(height,angle):
+#Calculates joint angles based on height(defined) and depth(calculated)#
+#FUNCTION IS PROBABLY BROKEN, RETURNS MOTION NOT DESIRED#
+    for x in range(1,len(linePathList[0])+1):
+        xcord=int(linePathList[0][x-1])
+        ycord=int(linePathList[1][x-1])
+        global depth
+        global gheight
+        gheight = height
+        depth = sqrt((xcord**2+ycord**2))
+        findAngles(height,depth,angle)
+            
+        if 0 < linePathList[0][x-1] and 0 < linePathList[1][x-1]: # point is in first quadrant
+            rotation = int(degrees(atan(float(linePathList[1][x-1])/float(linePathList[0][x-1]))))
+        elif 0 > linePathList[0][x-1] and 0 < linePathList[1][x-1]:  # point is in second quadrant
+            rotation = int(degrees(atan(float(linePathList[1][x-1])/float(linePathList[0][x-1])))+90)
+        elif 0 > linePathList[0][x-1] and 0 > linePathList[1][x-1]:   # point is in third quadrant
+            rotation = int(degrees(atan(float(linePathList[1][x-1])/float(linePathList[0][x-1])))+180)       
+        elif 0 < linePathList[0][x-1] and 0 > linePathList[1][x-1]:   # point is in fourth quadrant
+            rotation = int(degrees(atan(float(linePathList[1][x-1])/float(linePathList[0][x-1])))+270)
+
+        angleList[0].append(rotation)#rotation angle
+        angleList[1].append(shoulder)#shoulder angle
+        angleList[2].append(elbow)#elbow angle
+        angleList[3].append(wristAngle)#wrist angle
+        
+def setListToSendList():
+# Function converts calculated angles to send values #
+    for x in range(0,len(angleList[0])):
+        sendList[0].append(int(angleList[0][x]))#rotation angle
+        sendList[1].append(int(floor(44.00/45.00*angleList[1][x])))#shoulder angle
+        sendList[2].append(int(90+angleList[2][x]))#elbow angle
+        sendList[3].append(int(90+angleList[3][x]))#wrist angle
+
+def debugMode(debug1,debug2,debug3,debug4):
+    if debug1 == 1:
+        print linePathList[0]
+        print linePathList[1]
+
+    if debug2 == 1:
+        print angleList[0]
+        print angleList[1]
+        print angleList[2]
+        print angleList[3]
+    
+    if debug3 == 1:        
+        print sendList[0]
+        print sendList[1]
+        print sendList[2]
+        print sendList[3]
+
+    if debug4 == 1:
+        print "shoulder:",shoulder
+        print "elbow:",elbow
+        print "height:",gheight
+        print "depth:",depth
+        print "wristAngleToGround:",gwristAngleToGround
+        print "wristAngle:",wristAngle
+
+while True:
+    interpolateXY(150,360,150,320)#(x0,y0)(x1,y1)
+    calculateAngleList(400,-30)#input height and wristangleToGround
+    setListToSendList()
+    try:
+        #debugMode(0,0,1,1)
+        sendPositions("send")
+        #findAngles(320,450,0)
+        
+        print "end"
+        time.sleep(3000)
+
+    except ValueError:
+        print "Could you at least give me an actual number?"
+        continue
+    except IOError:
+		       errors += 1
+		       FNULL = open(os.devnull, 'w')
+		       subprocess.call(['i2cdetect', '-y', '1'],stdout=FNULL, stderr=subprocess.STDOUT)
+
+    except (KeyboardInterrupt):
+        bus.write_byte(addresses[0],100)
+        bus.write_byte(addresses[1],15)
+        bus.write_byte(addresses[2],80)
+        bus.write_byte(addresses[3],89)
+        print "Error caught:", errors
+        print "Quit"
+        exit()
+        
+    
